@@ -24,7 +24,6 @@ use optics_base::{
     home::Homes,
     persistence::UsingPersistence,
     replica::Replicas,
-    reset_loop, reset_loop_if,
 };
 use optics_core::{
     accumulator::merkle::Proof,
@@ -35,6 +34,37 @@ use crate::{
     prover::{Prover, ProverSync},
     settings::ProcessorSettings as Settings,
 };
+
+enum LoopAction {
+    SkipSleep,
+    DoSleep,
+}
+
+/// Shortcut for resetting a timed loop
+macro_rules! reset_loop {
+    ($interval:expr) => {{
+        tokio::time::sleep(std::time::Duration::from_secs($interval)).await;
+        // "continue"
+        return Ok(LoopAction::SkipSleep);
+    }};
+}
+
+/// Shortcut for conditionally resetting a timed loop
+macro_rules! reset_loop_if {
+    ($condition:expr, $interval:expr) => {
+        if $condition {
+            $crate::reset_loop!($interval);
+        }
+    };
+    ($condition:expr, $interval:expr, $($arg:tt)*) => {
+        if $condition {
+            tracing::info!($($arg)*);
+            reset_loop!($interval);
+        }
+    };
+}
+
+
 
 #[derive(Debug)]
 pub(crate) struct ReplicaProcessor {
@@ -89,76 +119,86 @@ impl ReplicaProcessor {
             // 5. Submit the proof to the replica
             let mut sequence = self.replica.next_to_process().await?;
             loop {
-                info!(
-                    "Next to process for replica {} is {}",
-                    self.replica.name(),
-                    sequence
-                );
+                // enter a new span.
+                let seq_span = tracing::trace_span!("ReplicaProcessor", name = self.replica.name(), sequence = sequence);
 
-                let message = self.home.message_by_sequence(domain, sequence).await?;
-                reset_loop_if!(
-                    message.is_none(),
-                    self.interval,
-                    "Home does not contain message at {}:{}",
-                    domain,
-                    sequence,
-                );
-
-                let message = message.unwrap();
-
-                // check allow/deny lists
-
-                // if we have an allow list, filter senders not on it
-                if let Some(false) = self.allowed.as_ref().map(|set| set.contains(&message.message.sender)) {
-                    sequence += 1;
-                    reset_loop!(self.interval);
-                }
-
-                // if we have a deny list, filter senders on it
-                if let Some(true) = self.denied.as_ref().map(|set| set.contains(&message.message.sender)) {
-                    sequence += 1;
-                    reset_loop!(self.interval);
-                }
-
-                let proof_opt = Self::db_get(&self.db, message.leaf_index as usize)?;
-
-                reset_loop_if!(
-                    proof_opt.is_none(),
-                    self.interval,
-                    "Proof not yet available for message at {}:{}",
-                    domain,
-                    sequence,
-                );
-
-                let proof = proof_opt.unwrap();
-                if proof.leaf != message.to_leaf() {
-                    let err = format!("Leaf in prover does not match retrieved message. Index: {}. Calculated: {}. Prover: {}.", message.leaf_index, message.to_leaf(), proof.leaf);
-                    error!("{}", err);
-                    bail!(err);
-                }
-
-                while !self.replica.acceptable_root(proof.root()).await? {
-                    info!(
-                        "Proof under root {} not yet valid on replica {}",
-                        proof.root(),
-                        self.replica.name(),
+                let control_flow_action = async {
+                    let message = self.home.message_by_sequence(domain, sequence).await?;
+                    reset_loop_if!(
+                        message.is_none(),
+                        self.interval,
+                        "Home does not contain message at {}:{}",
+                        domain,
+                        sequence,
                     );
-                    sleep(Duration::from_secs(self.interval)).await;
-                }
 
-                // Dispatch for processing
-                info!(
-                    "Dispatching a message for processing {}:{}",
-                    domain, sequence
-                );
-                self.process(message, proof).await?;
+                    let message = message.unwrap();
+
+                    // check allow/deny lists
+
+                    info!(target: "seen_committed_messages", leaf_index = message.leaf_index);
+
+                    // if we have an allow list, filter senders not on it
+                    if let Some(false) = self.allowed.as_ref().map(|set| set.contains(&message.message.sender)) {
+                        sequence += 1;
+                        reset_loop!(self.interval);
+                    }
+
+                    // if we have a deny list, filter senders on it
+                    if let Some(true) = self.denied.as_ref().map(|set| set.contains(&message.message.sender)) {
+                        sequence += 1;
+                        reset_loop!(self.interval);
+                    }
+
+                    let proof_opt = Self::db_get(&self.db, message.leaf_index as usize)?;
+
+                    reset_loop_if!(
+                        proof_opt.is_none(),
+                        self.interval,
+                        "Proof not yet available for message at {}:{}",
+                        domain,
+                        sequence,
+                    );
+
+                    let proof = proof_opt.unwrap();
+                    if proof.leaf != message.to_leaf() {
+                        let err = format!("Leaf in prover does not match retrieved message. Index: {}. Calculated: {}. Prover: {}.", message.leaf_index, message.to_leaf(), proof.leaf);
+                        error!("{}", err);
+                        bail!(err);
+                    }
+
+                    while !self.replica.acceptable_root(proof.root()).await? {
+                        info!(
+                            "Proof under root {root} not yet valid here",
+                            root = proof.root(),
+                        );
+                        sleep(Duration::from_secs(self.interval)).await;
+                    }
+
+                    // Dispatch for processing
+                    info!(
+                        "Dispatching a message for processing {}:{}",
+                        domain, sequence
+                    );
+                    self.process(message, proof).await?;
+                    Ok(LoopAction::DoSleep)
+                }.instrument(seq_span);
+
+                let cfa = control_flow_action.await?;
+                // TODO: ought this not be updated if SkipSleep?
+                // i think the macros previously would keep seq the same and try-again after a timeout.
+                // it'd be nice to have event notifications so we could hang a future off something's
+                // readiness instead of just waiting and crossing fingers...
                 sequence = self.replica.next_to_process().await?;
-                sleep(Duration::from_secs(self.interval)).await;
-            }
+                match cfa {
+                    LoopAction::DoSleep => sleep(Duration::from_secs(self.interval)).await,
+                    LoopAction::SkipSleep => { /* */ },
+                }
+            } 
         }.in_current_span())
     }
 
-    #[instrument(err)]
+    #[instrument(err, level = "trace")]
     /// Dispatch a message for processing. If the message is already proven, process only.
     async fn process(&self, message: CommittedMessage, proof: Proof) -> Result<()> {
         let status = self.replica.message_status(message.to_leaf()).await?;
