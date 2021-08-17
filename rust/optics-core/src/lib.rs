@@ -256,7 +256,7 @@ impl std::fmt::Display for OpticsMessage {
 }
 
 /// An Optics update message
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Update {
     /// The home chain
     pub home_domain: u32,

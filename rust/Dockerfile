@@ -11,14 +11,10 @@ RUN apt-get update && \
 
 # Add workspace to workdir 
 COPY optics-core ./optics-core
-COPY optics-ethereum ./optics-ethereum
+COPY chains ./chains
 COPY optics-base ./optics-base 
 COPY optics-test ./optics-test
-COPY processor ./processor
-COPY relayer ./relayer
-COPY watcher ./watcher
-COPY updater ./updater
-COPY kathy ./kathy
+COPY agents ./agents
 COPY Cargo.toml .
 COPY Cargo.lock .
 
