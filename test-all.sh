@@ -1,38 +1,44 @@
 #!/bin/sh
 
+set -xe
+
 # update ABIs
-cd ./solidity
 
-echo "+Updating core ABIs"
-cd ./optics-core
-npm run compile
+(
+    cd ./solidity
 
-echo "+Updating xapps ABIs"
-cd ../optics-xapps
-npm run compile
-cd ..
+    echo "+Updating core ABIs"
+    cd ./optics-core
+    npm run compile
+
+    echo "+Updating xapps ABIs"
+    cd ../optics-xapps
+    npm run compile
+)
 
 # run Rust bins to output into vector JSON files
-cd ../rust/optics-core
+(
+    cd ./rust/optics-core
 
-echo "+Running lib vector generation"
-echo '+cargo run --bin lib_test_output --features output'
-cargo run --bin lib_test_output --features output
+    echo "+Running lib vector generation"
+    echo '+cargo run --bin lib_test_output --features output'
+    cargo run --bin lib_test_output --features output
 
-echo "+Running utils vector generation"
-echo '+cargo run --bin utils_test_output --features output'
-cargo run --bin utils_test_output --features output
-cd ..
+    echo "+Running utils vector generation"
+    echo '+cargo run --bin utils_test_output --features output'
+    cargo run --bin utils_test_output --features output
 
-# Run rust tests, clippy, and formatting
-echo "+Running rust tests"
-echo '+cargo fmt -- --check'
-cargo fmt -- --check
-echo '+cargo clippy -- -D warnings'
-cargo clippy -- -D warnings
-echo '+cargo test -- -q'
-cargo test -- -q
-cd ..
+    cd ..
+
+    # Run rust tests, clippy, and formatting
+    echo "+Running rust tests"
+    echo '+cargo fmt -- --check'
+    cargo fmt -- --check
+    echo '+cargo clippy -- -D warnings'
+    cargo clippy -- -D warnings
+    echo '+cargo test -- -q'
+    cargo test -- -q
+)
 
 # Run solidity tests
 cd ./solidity
